@@ -53,9 +53,11 @@ ${String(email).slice(0, 12000)}
 """`
 }
 
-async function gemini(p) {
-  const model = process.env.GEMINI_MODEL || 'gemini-2.5-flash'
-  const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+// Google retires model names over time. If the configured model is gone and
+// the 404 names a replacement ("...use models/<name>..."), retry once with it.
+let geminiModel = process.env.GEMINI_MODEL || 'gemini-3.8-flash'
+async function gemini(p, retried = false) {
+  const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-goog-api-key': process.env.GEMINI_API_KEY },
     body: JSON.stringify({
@@ -64,6 +66,10 @@ async function gemini(p) {
     }),
   })
   const j = await r.json().catch(() => ({}))
+  if (r.status === 404 && !retried) {
+    const next = /use models\/([\w.-]+)/.exec(j.error?.message || '')?.[1]
+    if (next && next !== geminiModel) { geminiModel = next; return gemini(p, true) }
+  }
   if (!r.ok) throw new Error(`Gemini error (${r.status}): ${j.error?.message || 'unknown'}`)
   return j.candidates?.[0]?.content?.parts?.map((x) => x.text).join('') || ''
 }
