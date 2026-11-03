@@ -1,12 +1,17 @@
 // GET /api/health -> which services are configured (never returns the keys).
+// Add ?deep=1 to sign in to PayPal and check the Invoicing permission.
 import { aiProvider } from './_lib/ai.js'
-import { paypalConfigured } from './_lib/paypal.js'
-import { send } from './_lib/http.js'
+import { paypalCanInvoice, paypalConfigured } from './_lib/paypal.js'
+import { query, send } from './_lib/http.js'
 
-export default function handler(req, res) {
-  send(res, 200, {
+export default async function handler(req, res) {
+  const out = {
     ok: true,
     paypal: paypalConfigured() ? (process.env.PAYPAL_ENV === 'live' ? 'live' : 'sandbox') : 'missing',
     ai: aiProvider() || 'missing',
-  })
+  }
+  if (query(req).deep && paypalConfigured()) {
+    try { out.paypal_invoicing = await paypalCanInvoice() } catch (e) { out.paypal_error = e.message }
+  }
+  send(res, 200, out)
 }

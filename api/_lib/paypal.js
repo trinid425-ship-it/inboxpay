@@ -22,8 +22,15 @@ async function token() {
   })
   const j = await r.json().catch(() => ({}))
   if (!r.ok) throw new Error(`PayPal sign-in failed: ${j.error_description || r.status}`)
-  cached = { token: j.access_token, exp: Date.now() + (j.expires_in || 3000) * 1000 }
+  cached = { token: j.access_token, exp: Date.now() + (j.expires_in || 3000) * 1000, scope: j.scope || '' }
   return cached.token
+}
+
+// For /api/health: does the current token include the Invoicing permission?
+export async function paypalCanInvoice() {
+  cached = { token: null, exp: 0 }
+  await token()
+  return /invoicing/i.test(cached.scope || '')
 }
 
 export async function pp(path, { method = 'GET', body } = {}, retried = false) {
