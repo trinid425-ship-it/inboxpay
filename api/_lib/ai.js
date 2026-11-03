@@ -53,37 +53,57 @@ ${String(email).slice(0, 12000)}
 """`
 }
 
-// Google retires model names over time. If the configured model is gone and
-// the 404 names a replacement ("...use models/<name>..."), retry once with it.
-let geminiModel = process.env.GEMINI_MODEL || 'gemini-3.8-flash'
-// Reading one email is a simple job, so ask for low "thinking" to keep replies
-// fast. If a model doesn't accept that setting, drop it and carry on.
-let lowThinking = true
-async function gemini(p, retried = false) {
+// Gemini models, best first. Google retires and overloads models from time to
+// time, so each one gets a time limit and the next is tried if it is busy,
+// too slow, or gone. GEMINI_MODEL (if set) goes first.
+const GEMINI_CHAIN = [...new Set([
+  process.env.GEMINI_MODEL, 'gemini-3.8-flash', 'gemini-3.5-flash', 'gemini-flash-latest', 'gemini-flash-lite-latest',
+].filter(Boolean))]
+let lowThinking = true   // reading one email is simple; keep "thinking" low for speed
+let lastGeminiModel = null
+
+async function geminiOnce(model, p, ms) {
   const generationConfig = { responseMimeType: 'application/json', temperature: 0.3 }
   if (lowThinking) generationConfig.thinkingConfig = { thinkingLevel: 'low' }
-  const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': process.env.GEMINI_API_KEY },
-    body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: p }] }], generationConfig }),
-  })
-  const j = await r.json().catch(() => ({}))
-  if (r.status === 400 && lowThinking && /think/i.test(j.error?.message || '')) {
-    lowThinking = false
-    return gemini(p, retried)
+  const ctl = new AbortController()
+  const timer = setTimeout(() => ctl.abort(), ms)
+  try {
+    const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+      method: 'POST',
+      signal: ctl.signal,
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': process.env.GEMINI_API_KEY },
+      body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: p }] }], generationConfig }),
+    })
+    const j = await r.json().catch(() => ({}))
+    if (r.status === 400 && lowThinking && /think/i.test(j.error?.message || '')) {
+      lowThinking = false
+      return geminiOnce(model, p, ms)
+    }
+    if (!r.ok) return { ok: false, status: r.status, message: j.error?.message || 'unknown' }
+    return { ok: true, text: j.candidates?.[0]?.content?.parts?.map((x) => x.text).join('') || '' }
+  } catch (e) {
+    return { ok: false, status: e.name === 'AbortError' ? 408 : 0, message: e.name === 'AbortError' ? 'took too long' : e.message }
+  } finally {
+    clearTimeout(timer)
   }
-  // Busy or rate-limited: wait a moment and try again (up to 2 more times).
-  if ((r.status === 503 || r.status === 429) && (gemini.busyTries = (gemini.busyTries || 0) + 1) <= 2) {
-    await new Promise((ok) => setTimeout(ok, 1500 * gemini.busyTries))
-    try { return await gemini(p, retried) } finally { gemini.busyTries = 0 }
-  }
-  if (r.status === 404 && !retried) {
-    const next = /use models\/([\w.-]+)/.exec(j.error?.message || '')?.[1]
-    if (next && next !== geminiModel) { geminiModel = next; return gemini(p, true) }
-  }
-  if (!r.ok) throw new Error(`Gemini error (${r.status}): ${j.error?.message || 'unknown'}`)
-  return j.candidates?.[0]?.content?.parts?.map((x) => x.text).join('') || ''
 }
+
+async function gemini(p) {
+  const started = Date.now()
+  let last = null
+  for (let i = 0; i < GEMINI_CHAIN.length; i++) {
+    const left = 100_000 - (Date.now() - started)          // stay under the 120s function limit
+    if (left < 8_000) break
+    const model = GEMINI_CHAIN[i]
+    const res = await geminiOnce(model, p, Math.min(i === GEMINI_CHAIN.length - 1 ? left : 25_000, left))
+    if (res.ok) { lastGeminiModel = model; return res.text }
+    last = { model, ...res }
+    // Wrong key or bad request won't be fixed by another model.
+    if (res.status === 400 || res.status === 401 || res.status === 403) break
+  }
+  throw new Error(`Gemini error${last ? ` (${last.status}) on ${last.model}: ${last.message}` : ''}`)
+}
+export const geminiModelUsed = () => lastGeminiModel
 
 async function anthropic(p) {
   const model = process.env.ANTHROPIC_MODEL || 'claude-sonnet-5-5'
@@ -130,5 +150,5 @@ export async function analyzeEmail({ business, email }) {
   let ai
   try { ai = parseJson(raw) } catch { throw new Error('The AI reply was not valid JSON. Try again.') }
   const priced = priceQuote(business, ai)
-  return { provider, ...ai, ...priced, deposit_pct: business.deposit_pct ?? 50 }
+  return { provider, model: provider === 'gemini' ? lastGeminiModel : process.env.ANTHROPIC_MODEL || 'claude-sonnet-5-5', ...ai, ...priced, deposit_pct: business.deposit_pct ?? 50 }
 }
