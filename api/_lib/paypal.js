@@ -26,7 +26,7 @@ async function token() {
   return cached.token
 }
 
-export async function pp(path, { method = 'GET', body } = {}) {
+export async function pp(path, { method = 'GET', body } = {}, retried = false) {
   const r = await fetch(`${BASE()}${path}`, {
     method,
     headers: {
@@ -39,6 +39,13 @@ export async function pp(path, { method = 'GET', body } = {}) {
   const text = await r.text()
   let j = null
   try { j = text ? JSON.parse(text) : null } catch { j = { raw: text } }
+  // A token issued before a feature (e.g. Invoicing) was switched on in the
+  // PayPal dashboard keeps the old permissions. On 401/403, get a fresh token
+  // and try once more.
+  if ((r.status === 401 || r.status === 403) && !retried) {
+    cached = { token: null, exp: 0 }
+    return pp(path, { method, body }, true)
+  }
   if (!r.ok) {
     const detail = j?.details?.map((d) => `${d.field || ''} ${d.description || d.issue || ''}`.trim()).join('; ')
     throw new Error(`PayPal ${method} ${path} failed (${r.status}): ${j?.message || ''}${detail ? ' — ' + detail : ''}`)

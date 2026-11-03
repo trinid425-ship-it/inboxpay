@@ -56,16 +56,22 @@ ${String(email).slice(0, 12000)}
 // Google retires model names over time. If the configured model is gone and
 // the 404 names a replacement ("...use models/<name>..."), retry once with it.
 let geminiModel = process.env.GEMINI_MODEL || 'gemini-3.8-flash'
+// Reading one email is a simple job, so ask for low "thinking" to keep replies
+// fast. If a model doesn't accept that setting, drop it and carry on.
+let lowThinking = true
 async function gemini(p, retried = false) {
+  const generationConfig = { responseMimeType: 'application/json', temperature: 0.3 }
+  if (lowThinking) generationConfig.thinkingConfig = { thinkingLevel: 'low' }
   const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-goog-api-key': process.env.GEMINI_API_KEY },
-    body: JSON.stringify({
-      contents: [{ role: 'user', parts: [{ text: p }] }],
-      generationConfig: { responseMimeType: 'application/json', temperature: 0.3 },
-    }),
+    body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: p }] }], generationConfig }),
   })
   const j = await r.json().catch(() => ({}))
+  if (r.status === 400 && lowThinking && /think/i.test(j.error?.message || '')) {
+    lowThinking = false
+    return gemini(p, retried)
+  }
   if (r.status === 404 && !retried) {
     const next = /use models\/([\w.-]+)/.exec(j.error?.message || '')?.[1]
     if (next && next !== geminiModel) { geminiModel = next; return gemini(p, true) }
