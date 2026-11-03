@@ -8,6 +8,14 @@ function loadBusiness() {
 }
 function saveBusiness(b) { try { localStorage.setItem(KEY, JSON.stringify(b)) } catch { /* ignore */ } }
 
+// Deposits taken with PayPal Checkout (when the account can't use Invoicing)
+// are remembered in this browser so the Invoices tab can show their status.
+const CK = 'inboxpay-checkouts-v1'
+function loadCheckouts() { try { return JSON.parse(localStorage.getItem(CK) || '[]') } catch { return [] } }
+function rememberCheckout(r) {
+  try { localStorage.setItem(CK, JSON.stringify([{ id: r.id, number: r.number, customer: r.customer, email: r.email, total: r.total, created: r.created }, ...loadCheckouts()].slice(0, 50))) } catch { /* ignore */ }
+}
+
 async function api(path, opts = {}) {
   const r = await fetch(path, { ...opts, headers: { 'Content-Type': 'application/json' } })
   const j = await r.json().catch(() => ({}))
@@ -23,6 +31,7 @@ export default function App() {
   const [tab, setTab] = useState('inbox')
   const [business, setBusiness] = useState(loadBusiness)
   const [health, setHealth] = useState(null)
+  const [paidId, setPaidId] = useState(() => new URLSearchParams(window.location.search).get('paid'))
   useEffect(() => { api('/api/health').then(setHealth).catch(() => setHealth({ paypal: 'missing', ai: 'missing' })) }, [])
   const update = (b) => { setBusiness(b); saveBusiness(b) }
 
@@ -40,6 +49,7 @@ export default function App() {
         <div className="warn">Setup needed: {health.paypal === 'missing' && 'PayPal keys '}{health.paypal === 'missing' && health.ai === 'missing' && '& '}{health.ai === 'missing' && 'an AI key '}are missing on the server. See README.</div>
       )}
       {health && health.paypal === 'sandbox' && <div className="sandbox">PayPal Sandbox mode: test payments only, no real money moves.</div>}
+      {paidId ? <PaidBanner id={paidId} onClose={() => { setPaidId(null); window.history.replaceState(null, '', '/') }} /> : null}
       {tab === 'inbox' && <Inbox business={business} onSent={() => setTab('invoices')} />}
       {tab === 'invoices' && <Invoices business={business} />}
       {tab === 'business' && <Business business={business} onChange={update} />}
@@ -67,6 +77,7 @@ function Inbox({ business, onSent }) {
     setErr(''); setBusy(true)
     try {
       const r = await api('/api/invoices', { method: 'POST', body: JSON.stringify({ business, quote: q, send: true }) })
+      if (r.kind === 'checkout') rememberCheckout(r)
       setResult(r)
     } catch (e) { setErr(e.message) }
     setBusy(false)
@@ -180,8 +191,17 @@ function Sent({ result, quote, business, onNew, onList }) {
     <main>
       <section className="card done">
         <div className="tick">✓</div>
-        <h2>Invoice {result.number ? `#${result.number} ` : ''}sent with PayPal</h2>
-        <p className="muted">{quote.customer?.name} will get PayPal’s invoice email at {quote.customer?.email}. They can pay the {fmt(result.deposit, business.currency)} deposit now and the rest later.</p>
+        {result.kind === 'checkout' ? (
+          <>
+            <h2>PayPal deposit link ready{result.number ? ` · ${result.number}` : ''}</h2>
+            <p className="muted">Send {quote.customer?.name || 'your customer'} the reply below. The link takes them to PayPal to pay the {fmt(result.deposit, business.currency)} deposit by PayPal or card, and it shows up as paid on your Invoices tab.</p>
+          </>
+        ) : (
+          <>
+            <h2>Invoice {result.number ? `#${result.number} ` : ''}sent with PayPal</h2>
+            <p className="muted">{quote.customer?.name} will get PayPal’s invoice email at {quote.customer?.email}. They can pay the {fmt(result.deposit, business.currency)} deposit now and the rest later.</p>
+          </>
+        )}
         <div className="kv">
           <div><span>Total</span><b>{fmt(result.total, business.currency)}</b></div>
           <div><span>Deposit</span><b>{fmt(result.deposit, business.currency)}</b></div>
@@ -219,7 +239,20 @@ function Status({ s }) { const [l, c] = STATUS[s] || [s || '—', 'grey']; retur
 function Invoices({ business }) {
   const [list, setList] = useState(null)
   const [err, setErr] = useState('')
-  const load = () => { setErr(''); api('/api/invoices').then((j) => setList(j.invoices || [])).catch((e) => { setErr(e.message); setList([]) }) }
+  const load = () => {
+    setErr('')
+    const ck = loadCheckouts()
+    Promise.all([
+      api('/api/invoices').then((j) => j.invoices || []),
+      ck.length ? api(`/api/checkout?ids=${ck.map((c) => c.id).join(',')}`).then((j) => (j.orders || []).map((o) => {
+        const m = ck.find((c) => c.id === o.id) || {}
+        const paid = Number(o.paid || 0)
+        return { ...o, number: m.number || o.number, customer: m.customer || o.customer, email: m.email || o.email, total: m.total ?? o.total, created: m.created || o.created,
+          status: paid > 0 && m.total && paid < Number(m.total) ? 'PARTIALLY_PAID' : o.status, due: m.total != null ? (Number(m.total) - paid).toFixed(2) : o.due }
+      })) : Promise.resolve([]),
+    ]).then(([a, b]) => setList([...b, ...a].sort((x, y) => String(y.created || '').localeCompare(String(x.created || '')))))
+      .catch((e) => { setErr(e.message); setList([]) })
+  }
   useEffect(load, [])
   const sum = (k) => (list || []).reduce((a, i) => a + Number(i[k] || 0), 0)
   return (
@@ -252,6 +285,20 @@ function Invoices({ business }) {
         <p className="muted small">Live from PayPal: statuses update the moment a customer pays.</p>
       </section>
     </main>
+  )
+}
+
+// Shown to the customer after they pay the deposit on PayPal (?paid=ORDER_ID).
+function PaidBanner({ id, onClose }) {
+  const ok = id && id !== 'error'
+  return (
+    <section className={'card done'} style={{ marginBottom: 14 }}>
+      <div className="tick" style={ok ? null : { background: 'var(--bad)' }}>{ok ? '✓' : '!'}</div>
+      <h2>{ok ? 'Deposit received. You’re booked!' : 'Payment didn’t go through'}</h2>
+      <p className="muted">{ok ? 'PayPal has confirmed your deposit. The business will be in touch with the final details.' : 'Nothing was charged. Please open the pay link again, or reply to the business email.'}</p>
+      {ok && <p className="muted small">PayPal reference: {id}</p>}
+      <button className="link" onClick={onClose}>Close</button>
+    </section>
   )
 }
 

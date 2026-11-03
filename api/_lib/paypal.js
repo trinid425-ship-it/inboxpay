@@ -57,7 +57,9 @@ export async function pp(path, { method = 'GET', body } = {}, retried = false) {
   }
   if (!r.ok) {
     const detail = j?.details?.map((d) => `${d.field || ''} ${d.description || d.issue || ''}`.trim()).join('; ')
-    throw new Error(`PayPal ${method} ${path} failed (${r.status}): ${j?.message || ''}${detail ? ' — ' + detail : ''}`)
+    const err = new Error(`PayPal ${method} ${path} failed (${r.status}): ${j?.message || ''}${detail ? ' — ' + detail : ''}`)
+    err.status = r.status
+    throw err
   }
   return j
 }
@@ -140,5 +142,69 @@ export function summarize(inv) {
     due: inv.due_amount?.value ?? null,
     payer_link: payerLink(inv),
     memo: d.memo || '',
+  }
+}
+
+// ---------------------------------------------------------------------------
+// PayPal Checkout (Orders v2): used for the deposit when the merchant's PayPal
+// account can't use Invoicing (Invoicing isn't offered in every country). The
+// customer gets a PayPal pay link for exactly the deposit; when they approve,
+// PayPal sends them to /api/capture, which captures the money.
+
+export function depositOrderBody({ business, quote, origin, ref }) {
+  const cur = business.currency || 'USD'
+  const total = quote.items.reduce((a, it) => a + Number(it.unit_price) * Number(it.quantity), 0)
+  const deposit = Math.round(total * (Number(quote.deposit_pct ?? business.deposit_pct ?? 50) / 100) * 100) / 100
+  const amount = deposit > 0 ? deposit : total
+  const what = quote.items.map((i) => `${i.quantity}× ${i.name}`).join(', ')
+  return {
+    total, deposit: amount,
+    body: {
+      intent: 'CAPTURE',
+      purchase_units: [{
+        reference_id: ref,
+        custom_id: ref,
+        invoice_id: ref,
+        description: `${deposit > 0 && deposit < total ? 'Deposit' : 'Payment'}: ${what}${quote.date ? ` on ${quote.date}` : ''}`.slice(0, 127),
+        soft_descriptor: String(business.name || 'InboxPay').replace(/[^A-Za-z0-9 ]/g, '').slice(0, 22) || undefined,
+        amount: money(cur, amount),
+      }],
+      payment_source: {
+        paypal: {
+          experience_context: {
+            brand_name: String(business.name || 'InboxPay').slice(0, 127),
+            user_action: 'PAY_NOW',
+            shipping_preference: 'NO_SHIPPING',
+            return_url: `${origin}/api/capture`,
+            cancel_url: `${origin}/?cancelled=1`,
+          },
+        },
+      },
+    },
+  }
+}
+
+export function approveLink(order) {
+  return order?.links?.find((l) => l.rel === 'payer-action' || l.rel === 'approve')?.href || null
+}
+
+export function summarizeOrder(o, meta = {}) {
+  const pu = o.purchase_units?.[0] || {}
+  const cap = pu.payments?.captures?.[0]
+  const status = o.status === 'COMPLETED' ? 'PAID' : o.status === 'APPROVED' ? 'PAYMENT_PENDING' : 'SENT'
+  return {
+    id: o.id,
+    kind: 'checkout',
+    number: pu.reference_id || pu.invoice_id || o.id,
+    status,
+    created: o.create_time || meta.created,
+    customer: meta.customer || o.payer?.name?.given_name || '—',
+    email: meta.email || o.payer?.email_address || null,
+    total: meta.total ?? pu.amount?.value,
+    currency: pu.amount?.currency_code,
+    paid: cap?.status === 'COMPLETED' ? cap.amount?.value : '0.00',
+    due: meta.total != null ? (Number(meta.total) - (cap?.status === 'COMPLETED' ? Number(cap.amount?.value) : 0)).toFixed(2) : null,
+    payer_link: o.status === 'COMPLETED' ? null : approveLink(o),
+    memo: pu.description || '',
   }
 }
