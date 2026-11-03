@@ -30,7 +30,9 @@ async function token() {
 export async function paypalCanInvoice() {
   cached = { token: null, exp: 0 }
   await token()
-  return /invoicing/i.test(cached.scope || '')
+  const scopes = String(cached.scope || '').split(/\s+/).filter(Boolean)
+    .map((x) => x.replace(/^https:\/\/uri\.paypal\.com\/services\//, '').replace(/^https?:\/\//, ''))
+  return { invoicing: scopes.some((x) => /invoic/i.test(x)), scopes }
 }
 
 export async function pp(path, { method = 'GET', body } = {}, retried = false) {

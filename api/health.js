@@ -11,7 +11,7 @@ export default async function handler(req, res) {
     ai: aiProvider() || 'missing',
   }
   if (query(req).deep && paypalConfigured()) {
-    try { out.paypal_invoicing = await paypalCanInvoice() } catch (e) { out.paypal_error = e.message }
+    try { const c = await paypalCanInvoice(); out.paypal_invoicing = c.invoicing; out.paypal_scopes = c.scopes } catch (e) { out.paypal_error = e.message }
   }
   send(res, 200, out)
 }
