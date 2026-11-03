@@ -30,7 +30,7 @@ Small tour operators and service businesses in the Caribbean get booking request
 | Invoicing v2: list and show invoices | Live status, paid and due amounts for the dashboard |
 | Orders v2 (Checkout) fallback | `POST /v2/checkout/orders` for the deposit when Invoicing is unavailable; `api/capture.js` is the `return_url` and captures the approved order; `api/checkout.js` reports status |
 
-The server checks the access token's scopes (`/api/health?deep=1`) and picks Invoicing or Checkout automatically, so the same app works for merchants in countries where PayPal Invoicing isn't enabled, which includes much of the Caribbean.
+The server tries Invoicing first and switches to Checkout automatically when PayPal refuses it (403); `/api/health?deep=1` shows whether the account has the Invoicing scope. This way so the same app works for merchants in countries where PayPal Invoicing isn't enabled, which includes much of the Caribbean.
 
 ## How AI is used
 
