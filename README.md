@@ -1,6 +1,8 @@
 # InboxPay
 
-**Turn customer emails into paid bookings.** Paste a booking enquiry; AI reads it, matches it to your services and prices, drafts your reply, and PayPal sends an invoice that collects the deposit.
+**Turn customer emails into paid bookings.** Paste a booking enquiry; AI reads it, matches it to your services and prices, drafts your reply, and PayPal collects the deposit.
+
+**Live demo:** https://inboxpay-five.vercel.app (PayPal sandbox)
 
 Built for the [PayPal AI Hackathon](https://paypalaihackathon.devpost.com/).
 
@@ -13,7 +15,7 @@ Small tour operators and service businesses in the Caribbean get booking request
 1. **Paste the email** (or pick a sample).
 2. **AI reads it:** customer, date, party size, constraints (cruise hours, kids' ages, "private"), and which of *your* services fit. Anything it can't answer from your catalog goes into a "Check before sending" list instead of being made up.
 3. **You review the quote.** Prices always come from your service list, never from the AI (the server re-prices every line).
-4. **One click creates a PayPal invoice** with the deposit set as the minimum partial payment, and PayPal emails it to the customer. They can pay by PayPal or card.
+4. **One click creates the PayPal payment.** If the account has PayPal Invoicing, it creates and sends an invoice with the deposit as the minimum partial payment. If not (Invoicing isn't offered in every country), it falls back to a **PayPal Checkout** link for the deposit. Either way the customer pays by PayPal or card.
 5. **Copy the drafted reply**, now with the pay link.
 6. **Invoices tab:** live status from PayPal (waiting for deposit → deposit paid → paid in full) plus totals quoted, collected and still due.
 
@@ -26,10 +28,13 @@ Small tour operators and service businesses in the Caribbean get booking request
 | Invoicing v2: create draft invoice | `POST /v2/invoicing/invoices` with items, terms, recipient, and `configuration.partial_payment` (`allow_partial_payment` + `minimum_amount_due` = the deposit) |
 | Invoicing v2: send invoice | `POST /v2/invoicing/invoices/{id}/send` returns the customer's PayPal pay page (`payer-view`) |
 | Invoicing v2: list and show invoices | Live status, paid and due amounts for the dashboard |
+| Orders v2 (Checkout) fallback | `POST /v2/checkout/orders` for the deposit when Invoicing is unavailable; `api/capture.js` is the `return_url` and captures the approved order; `api/checkout.js` reports status |
+
+The server checks the access token's scopes (`/api/health?deep=1`) and picks Invoicing or Checkout automatically, so the same app works for merchants in countries where PayPal Invoicing isn't enabled, which includes much of the Caribbean.
 
 ## How AI is used
 
-`api/_lib/ai.js` sends the email, the business's catalog and policies, and strict rules to **Google Gemini** (or **Anthropic Claude**, with whichever key is set) and asks for JSON only:
+`api/_lib/ai.js` sends the email, the business's catalog and policies, and strict rules to **Google Gemini** (tries several Gemini models in turn, each with a time limit, so a busy model doesn't stall the request) (or **Anthropic Claude**, with whichever key is set) and asks for JSON only:
 - extracts the customer, date (resolving "January 22nd" to the next occurrence), party size and constraints
 - chooses catalog items and quantities, with a reason for each
 - lists unanswered questions and requests that aren't in the catalog, so the owner checks them instead of the model guessing
@@ -70,7 +75,9 @@ Import the repo into Vercel, add the same environment variables, and deploy.
 ```
 api/
   analyze.js        POST: email -> structured quote + draft reply (AI)
-  invoices.js       GET list/one, POST create + send (PayPal Invoicing v2)
+  invoices.js       GET list/one, POST create + send (Invoicing v2, or Checkout fallback)
+  checkout.js       GET status of Checkout deposit orders
+  capture.js        PayPal return_url: captures the approved deposit
   health.js         which services are configured
   _lib/ai.js        prompt, Gemini/Claude calls, server-side pricing
   _lib/paypal.js    OAuth, REST helper, invoice body builder
