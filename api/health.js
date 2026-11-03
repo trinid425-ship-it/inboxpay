@@ -13,5 +13,12 @@ export default async function handler(req, res) {
   if (query(req).deep && paypalConfigured()) {
     try { const c = await paypalCanInvoice(); out.paypal_invoicing = c.invoicing; out.paypal_scopes = c.scopes } catch (e) { out.paypal_error = e.message }
   }
+  if (query(req).models && process.env.GEMINI_API_KEY) {
+    try {
+      const r = await fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=200', { headers: { 'x-goog-api-key': process.env.GEMINI_API_KEY } })
+      const j = await r.json()
+      out.gemini_models = (j.models || []).filter((m) => (m.supportedGenerationMethods || []).includes('generateContent')).map((m) => m.name.replace('models/', ''))
+    } catch (e) { out.gemini_error = e.message }
+  }
   send(res, 200, out)
 }

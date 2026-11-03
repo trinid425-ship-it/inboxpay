@@ -72,6 +72,11 @@ async function gemini(p, retried = false) {
     lowThinking = false
     return gemini(p, retried)
   }
+  // Busy or rate-limited: wait a moment and try again (up to 2 more times).
+  if ((r.status === 503 || r.status === 429) && (gemini.busyTries = (gemini.busyTries || 0) + 1) <= 2) {
+    await new Promise((ok) => setTimeout(ok, 1500 * gemini.busyTries))
+    try { return await gemini(p, retried) } finally { gemini.busyTries = 0 }
+  }
   if (r.status === 404 && !retried) {
     const next = /use models\/([\w.-]+)/.exec(j.error?.message || '')?.[1]
     if (next && next !== geminiModel) { geminiModel = next; return gemini(p, true) }
